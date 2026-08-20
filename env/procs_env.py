@@ -15,6 +15,8 @@ from .procs_core import (
 )
 
 DIVERGENCE_PENALTY = 600.0
+MAX_CONTACT_FORCE_N = 300.0
+CONSTRAINT_WEIGHT = 5.0
 
 
 class ProcsEnv(gym.Env):
@@ -94,6 +96,7 @@ class ProcsEnv(gym.Env):
         # 动作空间：归一化后 [-1, 1]，训练时再映射为 ±action_max N
         self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float32)
 
+        # 最慢车速，用于估算需要最多的控制步
         slowest_speed = speed_range_kmh[0] if speed_range_kmh is not None else speed_kmh
         self.max_episode_steps = self._control_steps_at_speed(float(slowest_speed))
 
@@ -112,7 +115,7 @@ class ProcsEnv(gym.Env):
         value: tuple[float, float] | None,
         *,
         lower: float,
-        inclusive: bool = True,
+        inclusive: bool = True,  # 决定下界是大于等于还是严格大于
     ) -> None:
         if value is None:
             return
@@ -232,7 +235,7 @@ class ProcsEnv(gym.Env):
                     'episode_return': self._episode_return,
                 },
             )
-        fc = hist['contact_force']
+        fc = hist['contact_force']  # 控制步内的接触力
         obs = self._observation()
 
         # 发散 / NaN：仿真状态已失效，统一终止并给大惩罚（离线 fc=0 不算发散）
@@ -258,15 +261,23 @@ class ProcsEnv(gym.Env):
             return obs, 0.0, False, True, {}
 
         target_force = self.target_contact_force(self._core.speed_kmh)
+        n_actual = int(hist['n_actual'])
         mean_fc = float(fc.mean())
         std_fc = float(fc.std())
-        force_mse = float(np.mean(((fc - target_force) / target_force) ** 2))
-        loss_fraction = float((fc == 0.0).mean())
-        action_penalty = 0.01 * normalized_action**2
+        force_mse = float(np.mean(((fc - target_force) / target_force) ** 2))  # 力跟踪误差
+        n_loss = int((fc <= 0.0).sum())  # 离线步数
+        n_overforce = int((fc >= MAX_CONTACT_FORCE_N).sum())  # 超过300N的步数
+        loss_fraction = n_loss / n_actual  # 离线比
+        overforce_fraction = n_overforce / n_actual  # 超力比
+        min_fc = float(fc.min())
+        max_fc = float(fc.max())
+        action_penalty = 0.01 * normalized_action**2  # 惩罚动作幅度大
         action_delta = normalized_action - self._previous_action
-        action_rate_penalty = self.action_rate_weight * action_delta**2
+        action_rate_penalty = self.action_rate_weight * action_delta**2  # 惩罚动作变化太快
 
-        reward = -force_mse - action_penalty - action_rate_penalty - 5.0 * loss_fraction
+        reward = (
+            -force_mse - CONSTRAINT_WEIGHT * (loss_fraction + overforce_fraction) - action_penalty - action_rate_penalty
+        )
 
         self._previous_action = normalized_action
 
@@ -279,10 +290,15 @@ class ProcsEnv(gym.Env):
         info = {
             'mean_Fc_N': mean_fc,
             'std_Fc_N': std_fc,
+            'min_Fc_N': min_fc,
+            'max_Fc_N': max_fc,
             'force_mse': force_mse,
             'loss_fraction': loss_fraction,
+            'overforce_fraction': overforce_fraction,
+            'n_loss': n_loss,
+            'n_overforce': n_overforce,
             'f3_N': f3,
-            'n_inner_actual': int(hist['n_actual']),
+            'n_inner_actual': n_actual,
             'target_Fc_N': target_force,
             'action_delta': action_delta,
             'action_rate_penalty': action_rate_penalty,
@@ -298,6 +314,7 @@ class ProcsEnv(gym.Env):
         return None
 
 
+# XuanCe 适配器
 class ProcsXuanceEnv(RawEnvironment):
     """XuanCe adapter for the Gymnasium-compatible PROCS environment."""
 
@@ -330,31 +347,3 @@ class ProcsXuanceEnv(RawEnvironment):
 
     def close(self):
         return self.env.close()
-
-
-if __name__ == '__main__':
-    from gymnasium.utils.env_checker import check_env
-
-    env = ProcsEnv(speed_kmh=200.0, speed_range_kmh=None)
-    print('Running Gymnasium env check...')
-    check_env(env, skip_render_check=True)
-    print('check_env passed.')
-
-    # 随机策略 rollout 一回合，打印耗时与接触力统计
-    import time
-
-    obs, info = env.reset(seed=42)
-    t0 = time.perf_counter()
-    total_reward = 0.0
-    fcs = []
-    while True:
-        action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
-        total_reward += reward
-        fcs.append(info['mean_Fc_N'])
-        if terminated or truncated:
-            break
-    elapsed = time.perf_counter() - t0
-    fcs = np.array(fcs)
-    print(f'Random rollout: {env._episode_steps} control steps, {elapsed:.1f} s, return {total_reward:.3f}')
-    print(f'Mean Fc {fcs.mean():.2f} N, std {fcs.std(ddof=1):.2f} N, min {fcs.min():.2f} N, max {fcs.max():.2f} N')

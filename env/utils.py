@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -102,27 +101,3 @@ def filter_csv(
     )
     frame.to_csv(output_path, index=False)
     return output_path
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('input_csv', type=Path)
-    parser.add_argument('-o', '--output', type=Path)
-    parser.add_argument('--time-column', default=DEFAULT_TIME_COLUMN)
-    parser.add_argument('--force-column', default=DEFAULT_FORCE_COLUMN)
-    parser.add_argument('--cutoff-hz', type=float, default=DEFAULT_CUTOFF_HZ)
-    parser.add_argument('--order', type=int, default=DEFAULT_ORDER)
-    args = parser.parse_args()
-    output = filter_csv(
-        args.input_csv,
-        args.output,
-        time_column=args.time_column,
-        force_column=args.force_column,
-        cutoff_hz=args.cutoff_hz,
-        order=args.order,
-    )
-    print(f'Filtered CSV written -> {output}')
-
-
-if __name__ == '__main__':
-    main()
