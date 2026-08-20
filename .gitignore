@@ -1,0 +1,11 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# outputs / python cache
+results/
+logs/
+models/
+__pycache__/
+
+.vscode/*

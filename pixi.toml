@@ -1,0 +1,22 @@
+[workspace]
+authors = ["afragrant <394451070@qq.com>"]
+channels = ["conda-forge"]
+name = "drl_control_procs"
+platforms = [
+    {"platform" = "linux-64", cuda="13.3"},
+    {"platform" = "win-64", cuda="13.3"}
+]
+version = "0.1.0"
+
+[tasks]
+sac-train = "python run_sac.py train"
+sac-validate = "python run_sac.py validate"
+tensorboard = "tensorboard --logdir logs/sac"
+
+[dependencies]
+python = "==3.12.13"
+
+
+[pypi-dependencies]
+xuance = ">=1.4.4, <2"
+pandas = ">=3.0.5, <4"
