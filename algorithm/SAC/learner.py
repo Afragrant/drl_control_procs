@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -19,21 +20,23 @@ class SACLearner(Learner):
             'actor': torch.optim.Adam(self.policy.actor_parameters, self.config.learning_rate_actor),
             'critic': torch.optim.Adam(self.policy.critic_parameters, self.config.learning_rate_critic),
         }
-        # 学习率调度器设置
-        self.scheduler = {
-            'actor': torch.optim.lr_scheduler.LinearLR(
-                self.optimizer['actor'],
-                start_factor=1.0,
-                end_factor=self.end_factor_lr_decay,
-                total_iters=self.total_iters,
-            ),
-            'critic': torch.optim.lr_scheduler.LinearLR(
-                self.optimizer['critic'],
-                start_factor=1.0,
-                end_factor=self.end_factor_lr_decay,
-                total_iters=self.total_iters,
-            ),
-        }
+        if self.use_linear_lr_decay:
+            self.scheduler = {
+                'actor': torch.optim.lr_scheduler.LinearLR(
+                    self.optimizer['actor'],
+                    start_factor=1.0,
+                    end_factor=self.end_factor_lr_decay,
+                    total_iters=self.total_iters,
+                ),
+                'critic': torch.optim.lr_scheduler.LinearLR(
+                    self.optimizer['critic'],
+                    start_factor=1.0,
+                    end_factor=self.end_factor_lr_decay,
+                    total_iters=self.total_iters,
+                ),
+            }
+        else:
+            self.scheduler = None
         self.mse_loss = nn.MSELoss()
         self.tau = config.tau
         self.gamma = config.gamma
@@ -49,6 +52,50 @@ class SACLearner(Learner):
             )
             self.alpha = self.log_alpha.exp()
             self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=config.learning_rate_actor)
+
+    def save_model(self, model_path):
+        super().save_model(model_path)
+        checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+        if self.use_automatic_entropy_tuning:
+            checkpoint['log_alpha'] = self.log_alpha.detach().cpu()
+            checkpoint['alpha_optimizer'] = self.alpha_optimizer.state_dict()
+        if self.scheduler is not None:
+            checkpoint['scheduler'] = {k: v.state_dict() for k, v in self.scheduler.items()}
+        torch.save(checkpoint, model_path)
+
+    def load_model(self, path, model=None):
+        dir_name = super().load_model(path, model)
+        checkpoint_path = self._resolve_checkpoint_path(path, model, dir_name)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+        self._restore_sac_extras(checkpoint)
+        return dir_name
+
+    @staticmethod
+    def _resolve_checkpoint_path(path, model, dir_name):
+        path_obj = Path(path)
+        if model is None and path_obj.is_file():
+            return str(path_obj)
+        if model is not None:
+            candidate = path_obj / model
+            if candidate.is_file():
+                return str(candidate)
+        model_names = sorted(Path(dir_name).glob('*.pth'))
+        for model_path in model_names:
+            if model_path.name == 'final_train_model.pth':
+                return str(model_path)
+        if len(model_names) == 1:
+            return str(model_names[0])
+        raise FileNotFoundError(f'cannot resolve checkpoint path in {dir_name}')
+
+    def _restore_sac_extras(self, checkpoint):
+        if self.use_automatic_entropy_tuning and 'log_alpha' in checkpoint:
+            self.log_alpha.data.copy_(checkpoint['log_alpha'].to(self.device))
+            self.alpha = self.log_alpha.exp()
+            if 'alpha_optimizer' in checkpoint:
+                self.alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer'])
+        if self.scheduler is not None and 'scheduler' in checkpoint:
+            for key, scheduler in self.scheduler.items():
+                scheduler.load_state_dict(checkpoint['scheduler'][key])
 
     def update(self, **samples):
         self.iterations += 1
