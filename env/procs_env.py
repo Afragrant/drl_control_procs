@@ -5,6 +5,7 @@ from typing import Any, ClassVar
 
 import gymnasium as gym
 import numpy as np
+from gymnasium.wrappers import FrameStackObservation
 from xuance.environment import RawEnvironment
 
 from .procs_core import (
@@ -27,7 +28,8 @@ class ProcsEnv(gym.Env):
     决策频率 control_freq Hz；每个决策保持约
     round(1/(control_freq*dt_base)) 个内部 Newmark 步。
     每个回合只覆盖稳定段（剔除首尾各 skip_spans 跨）：reset 时无控制
-    滑行至稳定段起点，到达稳定段终点即 truncated。
+    滑行至稳定段起点，到达稳定段终点即 terminated（自然终止，非 truncated）。
+    truncated 仅用于外部时间步上限等硬性截断。
     """
 
     metadata: ClassVar[dict[str, Any]] = {'render_modes': []}
@@ -258,7 +260,7 @@ class ProcsEnv(gym.Env):
 
         if hist['n_actual'] == 0:
             # step() 在到达终点后被继续调用
-            return obs, 0.0, False, True, {}
+            return obs, 0.0, True, False, {}
 
         target_force = self.target_contact_force(self._core.speed_kmh)
         n_actual = int(hist['n_actual'])
@@ -281,8 +283,9 @@ class ProcsEnv(gym.Env):
 
         self._previous_action = normalized_action
 
-        terminated = False
-        truncated = self._core.done()
+        at_end = self._core.done()
+        terminated = at_end
+        truncated = False
 
         self._episode_steps += 1
         self._episode_return += reward
@@ -314,23 +317,47 @@ class ProcsEnv(gym.Env):
         return None
 
 
+def parse_history_length(value, *, default: int = 0) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise TypeError(f'history_length must be an integer, got bool {value!r}')
+    if type(value) is not int:
+        raise TypeError(f'history_length must be a non-negative integer or None, got {type(value).__name__}: {value!r}')
+    if value < 0:
+        raise ValueError(f'history_length must be non-negative, got {value}')
+    return value
+
+
+def _copy_env_kwargs(env_config) -> dict:
+    raw_kwargs = getattr(env_config, 'env_kwargs', None)
+    if raw_kwargs is None:
+        return {}
+    if not isinstance(raw_kwargs, dict):
+        raise TypeError(f'env_config.env_kwargs must be None or a dictionary, got {type(raw_kwargs).__name__}')
+    return dict(raw_kwargs)
+
+
 # XuanCe 适配器
 class ProcsXuanceEnv(RawEnvironment):
     """XuanCe adapter for the Gymnasium-compatible PROCS environment."""
 
     def __init__(self, env_config):
         super().__init__()
-        env_kwargs = getattr(env_config, 'env_kwargs', {})
-        if not isinstance(env_kwargs, dict):
-            raise TypeError('env_config.env_kwargs must be a dictionary')
+        env_kwargs = _copy_env_kwargs(env_config)
 
         self.env_id = getattr(env_config, 'env_id', 'PROCS-v0')
         self.render_mode = getattr(env_config, 'render_mode', None)
-        self.env = ProcsEnv(**env_kwargs)
+        history_length = parse_history_length(env_kwargs.pop('history_length', None), default=0)
+        base_env = ProcsEnv(**env_kwargs)
+        self.max_episode_steps = base_env.max_episode_steps
+        if history_length > 0:
+            self.env = FrameStackObservation(base_env, stack_size=history_length, padding_type='reset')
+        else:
+            self.env = base_env
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
         self.metadata = self.env.metadata
-        self.max_episode_steps = self.env.max_episode_steps
         self._initial_seed = getattr(env_config, 'env_seed', None)
 
     def reset(self, **kwargs):
