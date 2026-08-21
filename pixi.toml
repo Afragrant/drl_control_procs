@@ -9,8 +9,6 @@ platforms = [
 version = "0.1.0"
 
 [tasks]
-sac-train = "python run_sac.py train"
-sac-validate = "python run_sac.py validate"
 tensorboard = "tensorboard --logdir logs/sac"
 
 [dependencies]
